@@ -1,0 +1,173 @@
+---
+title: Choe_G_Project2
+author: Gina Choe
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# QuickStart Data Science Bootcamp<br>Cohorts 3 and 4 - Jonathan Fowler
+
+## Project 2 (R)
+
+For this project, think of yourself as a developer on a corporate business intelligence team. You have been given a flat file (CSV format) of login information from Maximo, an asset tracking system the company relies on. Current licensing requires that no more than 95 users in the AUTHORIZED and/or LIMITED groups be online at any given time. The deliverables outlined in this project will be submitted to the IT director, who wants to be sure that the licensing threshold is not exceeded.
+
+### The Data
+
+The data is included in this project. The filename is **Project2Data.csv**.
+
+| Field     | Description   |
+|-----------|--------------|
+| attemptdate        | Date and Time of event          |
+| attemptresult | LOGIN, LOGOUT, TIMEOUT, or SYSLOGOUT |
+| userid  | The user triggering the event |
+| type      | User type, i.e., AUTHORIZED |
+| maxsessionuid   | Unique identifer for a session. This will show up from LOGIN to LOGOUT, TIMEOUT, or SYSLOGOUT. |
+
+### Part 1
+
+Let's answer some basic questions about the dataset. You may insert your code below each of these lines.  
+
+**Prework: Load the CSV file into your environment.**  
+```{r echo=TRUE}
+data <- read.csv('Project2Data.csv')
+
+# Load necessary packages
+library(tidyverse)
+library(lubridate)
+
+```
+
+**1. How many unique users? A simple number will do here, no tables or formatting needed.**  
+```{r results='asis'}
+length(unique(data$userid))
+```
+
+> *I decided to check the number of unique users after cleanup.*
+
+```{r results='asis'}
+#### Clean UP ####
+
+# Convert attemptdate to POSIX(datetime) datatype.
+data$attemptdate <- as_datetime(data$attemptdate)
+
+# Convert userid, attemptresult, type, and maxsessionuid to factors.
+cols <- c("userid", "attemptresult", "type", "maxsessionuid")
+data[cols] <- lapply(data[cols], factor)
+rm(cols)
+
+# Filter out sessions that are not associated with a maxsessionuid, and filter 
+data_clean <- data %>% filter(!is.na(data$maxsessionuid) & data$maxsessionuid != 0)
+
+# Remove any instances that were observed more than once.
+data_clean <- data_clean[!duplicated(data_clean),]
+
+# Check number of unique users again.
+length(unique(data_clean$userid))
+
+```
+
+> *Which user was filtered out and why?*
+
+```{r results='asis'}
+# Create matrices of unique users derived from the data before and after cleanup. 
+user_original <- data.frame(unique(data$userid))
+colnames(user_original) <- c("userid")
+
+user_clean <- data.frame(unique(data_clean$userid))
+colnames(user_clean) <- c("userid")
+
+# Identify the userid that is missing from original data.
+user_lost <- user_original %>% filter(!userid %in% user_clean$userid)
+knitr::kable(user_lost, caption="Which user was filtered out?")
+
+# Print the logs that are associated with this userid.
+knitr::kable(data[c(data$userid == user_lost$userid), ])
+```
+
+> ###### *The userid HBA 2262 was removed because every attempt by this user was a FAILED attempt without a valid maxsessionuid. Therefore I am comfortable discounting this user from further analysis and report that there were 762 unique users.*
+
+**2. How many unique levels, unique users in each? I want a table that shows this information together.**  
+```{r results='asis'}
+data_user <- data_clean %>% group_by(type) %>% summarize(num_users = n_distinct(userid))
+data_user
+```
+
+**3. What is the average session time for each unique group?**  
+```{r results='asis'}
+# Create a dataframe of session start events.
+data_login <- data_clean %>% filter(attemptresult == "LOGIN") %>% dplyr::rename(start_result = attemptresult, start_time = attemptdate)
+
+# Create a dataframe of all session end events. 
+data_other <- data_clean %>% filter(attemptresult %in% c("LOGOUT", "TIMEOUT", "RESTART","SYSLOGOUT"))  # SYSLOGOUT included in case there are sessions that recorded this as only the endpoint.
+
+# Designate the earliest record of a session's end events as the true logout time.
+data_logout <- data_other %>% group_by(maxsessionuid) %>% filter(attemptdate == min(attemptdate)) %>% dplyr::rename(end_result = attemptresult, end_time = attemptdate)
+
+# Inner-join the login and logout dataframes to retrieve only the sessions that have complete start and end records.
+data_log <- merge(data_login, data_logout, by = c("maxsessionuid", "userid", "type"))
+
+# Reorder the dataframe for readability and add a column for intervals.
+data_log <- data_log%>% select(userid, type, maxsessionuid, start_result, end_result, start_time, end_time)
+data_log$interval <- difftime(data_log$end_time, data_log$start_time, units = "mins")
+
+data_log %>% group_by(type) %>% summarize(average = mean(interval))
+```
+
+**4. Which users have more than one session going at the same time?**  
+```
+# insert your code that produces the correct result here
+```
+
+### Part 2
+
+Your objective in this part is to create a Gantt chart that shows the following:  
+1. One unique userid per row <br>
+2. A Gantt chart on the right <br>
+3. Blocks of time representing when each user logged in, mapped on the time field <br>
+4. User's time blocks colored by which group they belong to <br>
+
+You're dealing with a lot of data, so a single chart that shows all users for the whole month would be impossible to read. How are you going to break this out into multiple, manageable charts? It's okay to produce a chart for each week in the month. Just show the code that creates all the charts.
+
+```
+# insert your code that produces the correct result here; this should include your data wrangling and ggplot2 construction
+```
+
+### Submissions
+
+Because we all will be working with the same data, you will only need to send me an updated version of this Markdown file. Please save it as *lastname_firstinitial_Project2.Rmd* and email to me directly at [jon@fowlercs.com](mailto:jon@fowlercs.com). Submissions must be made by **May 19 2020 11:59PM ET**. 
+
+### Resources 
+
+#### Gantt charts
+
+[https://www.statology.org/gantt-chart-r-ggplot2/](https://www.statology.org/gantt-chart-r-ggplot2/) <br>
+[https://stats.andrewheiss.com/misc/gantt.html](https://stats.andrewheiss.com/misc/gantt.html) <br> 
+[https://davetang.org/muse/2017/02/03/gantt-chart-using-r/](https://davetang.org/muse/2017/02/03/gantt-chart-using-r/) <br>
+[https://datascienceplus.com/visualize-your-cvs-timeline-with-r-gantt-style/](https://datascienceplus.com/visualize-your-cvs-timeline-with-r-gantt-style/) <br>
+[https://edwinth.github.io/blog/paletti/](https://edwinth.github.io/blog/paletti/)
+[https://drsimonj.svbtle.com/creating-corporate-colour-palettes-for-ggplot2](https://drsimonj.svbtle.com/creating-corporate-colour-palettes-for-ggplot2)
+[http://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually](http://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually)
+
+
+#### R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

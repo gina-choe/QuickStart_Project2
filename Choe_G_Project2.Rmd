@@ -1,0 +1,544 @@
+---
+title: Project 2 (R)
+author: Gina Choe
+date: 05/20/2020
+output: 
+  html_document:
+   code_fold: show
+---
+```{css echo=FALSE}
+blockquote {
+    padding: 10px 10px;
+    margin: 0 0 10px;
+    font-size: 14px;
+    border-left: 5px solid #f6f9f9;
+    # font-weight: bold;
+}
+
+.outputs {
+    background-color: #f6f9f9;
+    border: 1px solid #aacaca;
+    font-weight: bold;
+}
+
+code {
+  white-space : pre-wrap !important;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(class.output = "outputs")
+```
+
+## QuickStart Data Science Bootcamp<br>Cohorts 3 and 4 - Jonathan Fowler
+
+For this project, think of yourself as a developer on a corporate business intelligence team. You have been given a flat file (CSV format) of login information from Maximo, an asset tracking system the company relies on. Current licensing requires that no more than 95 users in the AUTHORIZED and/or LIMITED groups be online at any given time. The deliverables outlined in this project will be submitted to the IT director, who wants to be sure that the licensing threshold is not exceeded.
+
+#### The Data
+
+The data is included in this project. The filename is **Project2Data.csv**.
+
+| Field     | Description   |
+|-----------|--------------|
+| attemptdate        | Date and Time of event          |
+| attemptresult | LOGIN, LOGOUT, TIMEOUT, or SYSLOGOUT |
+| userid  | The user triggering the event |
+| type      | User type, i.e., AUTHORIZED |
+| maxsessionuid   | Unique identifer for a session. This will show up from LOGIN to LOGOUT, TIMEOUT, or SYSLOGOUT. |
+
+### Part 1
+
+Let's answer some basic questions about the dataset. You may insert your code below each of these lines.  
+
+**Prework: Load the CSV file into your environment.**  
+```{r prework}
+data <- read.csv('Project2Data.csv')
+
+# Load the necessary packages for analysis.
+if (!require('data.table')) install.packages('data.table'); library(data.table)
+if (!require('tidyverse')) install.packages('tidyverse'); library(tidyverse)
+if (!require('lubridate')) install.packages('lubridate'); library(lubridate)
+if (!require('ggthemes')) install.packages('ggthemes'); library(ggthemes)
+if (!require('ggpubr')) install.packages('ggpubr'); library(ggpubr)
+if (!require('zoo')) install.packages('zoo'); library(zoo)
+
+
+# Load the package for table formatting for this R-markdown document.
+if (!require('kableExtra')) install.packages('kableExtra'); library('kableExtra')
+```
+
+**1. How many unique users? A simple number will do here, no tables or formatting needed.**  
+```{r unique_users}
+length(unique(data$userid))
+```
+
+> *I decided to check the number of unique users after cleanup.*
+
+```{r cleanup}
+#### Clean UP ####
+
+# Convert attemptdate to POSIX(datetime) datatype.
+data$attemptdate <- as_datetime(data$attemptdate)
+
+# Convert userid, attemptresult, type, and maxsessionuid to factors.
+cols <- c("userid", "attemptresult", "type", "maxsessionuid")
+data[cols] <- lapply(data[cols], factor)
+rm(cols)
+
+# Filter out sessions that are not associated with a maxsessionuid, and filter 
+data_clean <- data %>% filter(!is.na(data$maxsessionuid) & data$maxsessionuid != 0)
+
+# Remove any instances that were observed more than once.
+data_clean <- data_clean[!duplicated(data_clean),]
+
+# Check number of unique users again.
+length(unique(data_clean$userid))
+```
+
+> *Which user was filtered out and why?*
+
+```{r which_user}
+# Create matrices of unique users derived from the data before and after cleanup. 
+user_original <- data.frame(unique(data$userid))
+colnames(user_original) <- c("userid")
+
+user_clean <- data.frame(unique(data_clean$userid))
+colnames(user_clean) <- c("userid")
+
+# Identify the userid that is missing from original data.
+user_lost <- user_original %>% filter(!userid %in% user_clean$userid)
+user_lost
+
+# Print the logs that are associated with this userid.
+user_lost <- data %>% filter(userid == user_lost$userid)
+kable(user_lost) %>% kable_styling(bootstrap_options = "bordered", full_width = FALSE, position = "left") %>% column_spec(1:ncol(user_lost),background="#f6f9f9")
+```
+
+>*The userid HBA2262 was removed because every attempt by this user was a FAILED attempt without a valid maxsessionuid. Therefore I am comfortable discounting this user from further analysis and report that there were 762 unique users.*  
+<br>
+
+**2. How many unique levels, unique users in each? I want a table that shows this information together.**  
+```{r unique_levels}
+data_user <- data_clean %>% group_by(type) %>% summarize(num_users = n_distinct(userid))
+kable(data_user, col.names=c("Type", "Number of Users")) %>% kable_styling(bootstrap_options = "bordered", full_width = FALSE, position = "left") %>% column_spec(1:ncol(data_user),background="#f6f9f9")
+```
+<br>
+**3. What is the average session time for each unique group?**  
+```{r avg_session_initial}
+# Create a dataframe of session start events.
+data_login <- data_clean %>% filter(attemptresult == "LOGIN") %>% dplyr::rename(start_result = attemptresult, start_time = attemptdate)
+
+# Create a dataframe of all session end events. 
+data_other <- data_clean %>% filter(attemptresult %in% c("LOGOUT", "TIMEOUT", "RESTART","SYSLOGOUT"))  # SYSLOGOUT included in case there are sessions that recorded this as only the endpoint.
+
+# Designate the earliest record of a session's end events as the true logout time.
+data_logout <- data_other %>% group_by(maxsessionuid) %>% filter(attemptdate == min(attemptdate)) %>% dplyr::rename(end_result = attemptresult, end_time = attemptdate)
+
+# Inner-join the login and logout dataframes to retrieve only the sessions that have complete start and end records.
+data_log <- merge(data_login, data_logout, by = c("maxsessionuid", "userid", "type"))
+
+# Check that all the start events happens before end events.
+check <- data_log %>% filter(start_time > end_time)
+kable(check) %>% kable_styling(bootstrap_options = "bordered", full_width = FALSE, position = "left") %>% column_spec(1:ncol(check),background="#f6f9f9")
+```
+
+> *There is one anomaly due a restart event that occurred before a login event. The filters need to be further refined so that every end attempt occurred only after login.*  
+
+```{r avg_session_filtered}
+# Create a dataframe of all session-end events. 
+data_other <- data_clean %>% filter(attemptresult %in% c("LOGOUT", "TIMEOUT", "RESTART","SYSLOGOUT"))
+# SYSLOGOUT included because there are sessions that recorded this as the earliest the endpoint.
+
+# Create a simplified dataframe for login attempts. 
+data_login_temp <- data_login[ ,c("maxsessionuid", "start_time", "start_result")]
+
+# Left-join the end events with their corresponding login events. Keep only the ones that are not before the login time.
+data_join <- left_join(data_other, data_login_temp, by="maxsessionuid") %>% filter(attemptdate >= start_time)
+
+# Designate the earliest record of a session's end events as the true logout time.
+data_log <- data_join %>% group_by(maxsessionuid) %>% filter(attemptdate == min(attemptdate)) %>% dplyr::rename(end_result = attemptresult, end_time = attemptdate)
+# Check again if there are any sessions whose login events occurred before end events.
+nrow(data_log$start_time > data_log$end_time)
+```
+> *Now statisfied with the cleanup, I can proceed with the calculations.*
+
+```{r average_type}
+# Reorder the dataframe for readability and add a column for session intervals.
+data_log <- data_log %>% select(userid, type, maxsessionuid, start_result, end_result, start_time, end_time)
+data_log$duration <- difftime(data_log$end_time, data_log$start_time, units = "mins")
+
+# Calculate the average session times for each group.
+table <- data_log %>% group_by(type) %>% summarize(average = mean(duration))
+kable(table, digits = 2, col.names=c("Type", "Average")) %>% kable_styling(bootstrap_options = "bordered", full_width = F, position = "left") %>% column_spec(1:ncol(table), background="#f6f9f9")
+```
+<br>
+
+**4. Which users have more than one session going at the same time?**  
+```{r}
+# Create a dataframe with only the columns of interest.
+data_slim <- data_log[c("userid", "start_time", "end_time")]
+
+# Convert a copy of the new dataframe into a table compatible with the 'data.table' package.
+data_dt<- data_slim[c("userid", "start_time", "end_time")]
+setDT(data_dt)
+
+# Add columns with start times and end times as numerical types, since 'data.table' package does not accept POSIX objects.
+data_dt[, start:=as.numeric(start_time)]
+data_dt[, end:=as.numeric(end_time)]
+
+# Set the keys necessary to determine how the aggregation will be executed.
+setkey(data_dt, userid, start, end)
+
+# Perform a self-join aggregated by userid to count the number of concurrent sessions during each session. 
+data_dt[,num_sessions:=foverlaps(data_dt,data_dt, type="any", which=TRUE)[,.N, by=xid]$N]
+
+# Create a dataframe showing each user's maximum number of concurrent sessions observed.
+data_multiple <- data_dt %>% group_by(userid) %>% summarize(max_concurrent_sessions = max(num_sessions))
+
+# Show which users had multiple concurrent sessions at some point during data collection.
+data_multiple <- data_multiple %>% filter(max_concurrent_sessions > 1)
+knitr::kable(data_multiple, col.names=c("UserID", "Max Concurrent Sessions")) %>% kable_styling(bootstrap_options = "bordered",  full_width = F, position = "left") %>% column_spec(1:ncol(table), background="#f6f9f9") %>% scroll_box(width="280px",height = "210px")
+
+# Count many users had multiple concurrent sessions. 
+nrow(data_multiple)
+```
+
+### Part 2
+
+Your objective in this part is to create a Gantt chart that shows the following:  
+1. One unique userid per row <br>
+2. A Gantt chart on the right <br>
+3. Blocks of time representing when each user logged in, mapped on the time field <br>
+4. User's time blocks colored by which group they belong to <br>
+
+You're dealing with a lot of data, so a single chart that shows all users for the whole month would be impossible to read. How are you going to break this out into multiple, manageable charts? It's okay to produce a chart for each week in the month. Just show the code that creates all the charts.
+
+```{r}
+#Subset the dataframe with only the columns necessary for plotting. 
+data_chart <- data_log[c("userid", "start_time", "end_time", "type")]
+
+# Temporary vectors for subsequent ggplots.
+date_major <- as_datetime(c("2020-03-02","2020-03-09", "2020-03-16", "2020-03-23", "2020-03-30"))
+my_colors_3 <- c("#c4216b", "#0086b2", "#ff751a")
+my_colors_4 <- c("#c4216b", "#0086b2", "#ff751a", "#10273c")
+pos_x <- as_datetime(c("2020-03-08", "2020-03-15",  "2020-03-22",  "2020-03-29", "2020-03-28"))
+
+# Create a gantt chart that shows all the data.
+# Gantt chart for all weeks
+ggplot(data_chart, aes(x=start_time, xend=end_time, y=userid, yend=userid, color=type)) +
+  geom_segment(size=1) +
+  labs(title = "Maximo Usage by All Users in March", x = "Date", y = "UserID", color="User Type") +
+  scale_x_datetime(breaks=date_major, date_labels = "%m/%d") +
+  scale_color_manual(breaks=c("AUTHORIZED","LIMITED","EXPRESS"), values=my_colors_3) +
+  theme(
+    text= element_text(color="#a3a3a3"),
+    axis.text.x = element_text(size=9),
+    axis.text.y = element_text(size=1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+```
+
+> *Clearly, this is not a very useful data. In order to make the data more understandable, it might help to split the timeframe into roughly a week for each plot.*
+
+```{r}
+# Subset the data to get the first week's data. Filter only by end_time so that there won't be any orphaned sessions.
+data_chart_w1 <- data_chart %>% filter(end_time < as_datetime("2020-03-09 00:00:00")) 
+
+# Gantt chart for one week
+ggplot(data_chart_w1, aes(x=start_time, xend=end_time, y=userid, yend=userid, color=type)) +
+  geom_segment(size=1) +
+  labs(title = "Maximo Usage by All Users in Week 1", x = "Date", y = "UserID", color="User Type") +
+  scale_x_datetime(breaks=date_major, date_labels = "%m/%d") +
+  scale_color_manual(breaks=c("AUTHORIZED","LIMITED","EXPRESS"), values=my_colors_3) +
+  theme(
+    text= element_text(color="#a3a3a3"),
+    axis.text.x = element_text(size=9),
+    axis.text.y = element_text(size=1),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+```
+
+> *Even though I reduced the range of time to 1 week, it is still not very helpful because there are 762 unique users. For a better readability, it is necessary reduce the number of users.*
+
+```{r}
+# Subset the data the data further to get data from the first 50 users.
+user_clean <- sort(user_clean$userid)
+
+data_chart_w1_u1 <- data_chart_w1 %>% filter(userid %in% user_clean[1:50]) 
+
+# Gantt chart for one week for 50 users
+
+ggplot(data_chart_w1_u1, aes(x=start_time, xend=end_time, y=userid, yend=userid, color=type)) +
+  geom_segment(size=3) +
+  scale_x_datetime(date_breaks="1 day", date_labels = "%m/%d") +
+  labs(title = "Maximo Usage by 50 Users in Week 1", x = "Date", y = "UserID", color="User Type") +
+  scale_color_manual(breaks=c("AUTHORIZED","LIMITED","EXPRESS"),values=my_colors_3) +
+  theme_gdocs() +
+  
+  theme(text= element_text(color="#a3a3a3"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(size = 0.2),
+        axis.text.x = element_text(size=9),
+        axis.text.y = element_text(size=6),
+        axis.line.x.bottom = element_line(size=0),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)
+        )
+```
+
+> *This chart is much easier to read, and it is easier to understand a user's access pattern. However, in order to represent all data from the 762 users, we will require about 15 charts just for the first week. Reading 60 separate charts for the month of March does not help us see the big picture of usage pattern, nor answer the main question of interest, which is whether or not at any point the number of concurrent sessions surpass 95.*
+<br>
+
+> *Because the Gantt charts are good for looking at each user's history but do not give a general picture of the whole month, it is better to present the data as number of users on a timeline.*
+
+```{r timeseries}
+# Create a column showing the timespan of each session.
+data_chart$timespan <- interval(data_chart$start_time, data_chart$end_time, tz = "US/Central")
+
+# Define the intervals to measure concurrent sessions within the data collection period.
+interval<- seq((min(trunc(data_chart$start_time))), max(data_chart$end_time), by = "1 min")
+
+# Subset the dataframes by user type.
+data_auth <- data_chart[data_chart$type == "AUTHORIZED",]
+data_lim <- data_chart[data_chart$type == "LIMITED",]
+data_exp <- data_chart[data_chart$type == "EXPRESS",]
+
+# Count the number of concurrent sessions during each 1 min interval for each user type.
+n_auth <- sapply(interval, function(int) sum(int %within% data_auth$timespan))
+n_lim <- sapply(interval, function(int) sum(int %within% data_lim$timespan))
+n_exp <- sapply(interval, function(int) sum(int %within% data_exp$timespan))
+
+# Count the total number of concurrent sessions during each 1 min interval for all types.
+n_tot <- sapply(interval, function(int) sum(int %within% data_chart$timespan))
+
+# Combine the number of concurrent sessions by paid license types, AUTHORIZED or LIMITED. 
+n_paid <- n_auth + n_lim
+
+# Create a dataframe with all the different counts of concurrent users for plotting. 
+data_n <- data.frame(interval, n_auth, n_lim, n_exp, n_paid, n_tot)
+max_n <-data_n %>% summarise_if(is.numeric, funs(max(.)))
+kable(max_n, col.names=c("Authorized", "Limited","Express", "Paid", "All Types"), caption="Maximum concurrent sessions for each license type")  %>% kable_styling(bootstrap_options = "bordered",  full_width = F, position = "left") %>% column_spec(1:ncol(max_n), width = "7em", background="#f6f9f9") 
+
+
+# Timeline plot
+ggplot(data_n) +
+  geom_line(aes(x=interval, y=n_paid, color="Paid"),size=0.2) +
+  geom_line(aes(x=interval, y=n_exp, color="Express"),size=0.2) +
+  geom_line(aes(x=interval, y=n_auth, color="Authorized"), size=0.2) +
+  geom_line(aes(x=interval, y=n_lim, color="Limited"),size=0.2) +
+  labs(title = "Number of Concurrent Sessions in March", x="Time", y="Number of Users", color="User Type") +
+  scale_color_manual(breaks=c("Authorized","Limited","Express","Paid"), values=my_colors_4) +
+  scale_x_datetime(breaks=date_major, date_minor_breaks="1 day", date_labels = "%m/%d", expand = c(0,0)) +
+  scale_y_continuous(limits=c(0,100), breaks=sort(c(seq(0,100,10),95)), expand = c(0,0)) +
+  guides(color = guide_legend(override.aes = list(size = 2))) +
+  geom_hline(yintercept=95, linetype="longdash", color = "red", size=0.5) +
+  geom_text(aes(pos_x[5],95,label ="Max license", vjust=1.5), color="red", size=4) +
+  theme_gdocs() +
+  theme(axis.line.x = element_line(size = 0.1),
+        axis.line.y = element_line(size = 0.1),
+        panel.grid.minor.x = element_line(size=0.05),
+        panel.grid.major.x = element_line(size=0.5),
+        axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)
+        )
+```
+
+> *Show number of concurrent users for each week*
+
+```{r}
+# More detailed graphs by each week
+data_n_w1 <- data_n %>% filter(interval < as_datetime("2020-03-09 00:00:00"))
+data_n_w2  <- data_n %>% filter(interval >= as_datetime("2020-03-09 00:00:00") & interval < as_datetime("2020-03-16 00:00:00"))
+data_n_w3  <- data_n %>% filter(interval >= as_datetime("2020-03-16 00:00:00") & interval < as_datetime("2020-03-23 00:00:00"))
+data_n_w4 <- data_n %>% filter(interval >= as_datetime("2020-03-23 00:00:00") & interval < as_datetime("2020-03-30 00:00:00"))
+data_n_w5  <- data_n %>% filter(interval >= as_datetime("2020-03-30 00:00:00"))
+
+W1 <- ggplot(data_n_w1) +
+  geom_line(aes(x=interval, y=n_paid, color="Paid"),size=0.2) +
+  geom_line(aes(x=interval, y=n_exp, color="Express"),size=0.2) +
+  geom_line(aes(x=interval, y=n_auth, color="Authorized"), size=0.2) +
+  geom_line(aes(x=interval, y=n_lim, color="Limited"),size=0.2) +
+  labs(title = "Week 1", x="Time", y="Number of Sessions", color="User Type") +
+  scale_color_manual(breaks=c("Authorized","Limited","Express","Paid"), values=my_colors_4) +
+  scale_x_datetime(breaks="1 day", date_labels = "%m/%d", expand = c(0,0)) +
+  scale_y_continuous(limits=c(0,100), breaks=sort(c(seq(0,100,10),95)), expand = c(0,0)) +
+  guides(color = guide_legend(override.aes = list(size = 2))) +
+  geom_hline(yintercept=95, linetype="longdash", color = "red", size=0.5) +
+  geom_text(aes(pos_x[1],95,label ="Max license", vjust=1.5), color="red", size=4) +
+  theme_gdocs() +
+  theme(axis.line.x = element_line(size = 0.1),
+        axis.line.y = element_line(size = 0.1),
+        panel.grid.minor.x = element_line(size=0.05),
+        panel.grid.major.x = element_line(size=0.2),
+        axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)
+        )
+
+W2 <- ggplot(data_n_w2) +
+  geom_line(aes(x=interval, y=n_paid, color="Paid"),size=0.2) +
+  geom_line(aes(x=interval, y=n_exp, color="Express"),size=0.2) +
+  geom_line(aes(x=interval, y=n_auth, color="Authorized"), size=0.2) +
+  geom_line(aes(x=interval, y=n_lim, color="Limited"),size=0.2) +
+  labs(title = "Week 2", x="Time", y="Number of Sessions", color="User Type") +
+  scale_color_manual(breaks=c("Authorized","Limited","Express","Paid"), values=my_colors_4) +
+  scale_x_datetime(breaks="1 day", date_labels = "%m/%d", expand = c(0,0)) +
+  scale_y_continuous(limits=c(0,100), breaks=sort(c(seq(0,100,10),95)), expand = c(0,0)) +
+  guides(color = guide_legend(override.aes = list(size = 2))) +
+  geom_hline(yintercept=95, linetype="longdash", color = "red", size=0.5) +
+  geom_text(aes(pos_x[2],95,label ="Max license", vjust=1.5), color="red", size=4) +
+  theme_gdocs() +
+  theme(axis.line.x = element_line(size = 0.1),
+        axis.line.y = element_line(size = 0.1),
+        panel.grid.minor.x = element_line(size=0.05),
+        panel.grid.major.x = element_line(size=0.2),
+        axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)
+        )
+
+W3 <- ggplot(data_n_w3) +
+  geom_line(aes(x=interval, y=n_paid, color="Paid"),size=0.2) +
+  geom_line(aes(x=interval, y=n_exp, color="Express"),size=0.2) +
+  geom_line(aes(x=interval, y=n_auth, color="Authorized"), size=0.2) +
+  geom_line(aes(x=interval, y=n_lim, color="Limited"),size=0.2) +
+  labs(title = "Week 3", x="Time", y="Number of Sessions", color="User Type") +
+  scale_color_manual(breaks=c("Authorized","Limited","Express","Paid"), values=my_colors_4) +
+  scale_x_datetime(breaks="1 day", date_labels = "%m/%d", expand = c(0,0)) +
+  scale_y_continuous(limits=c(0,100), breaks=sort(c(seq(0,100,10),95)), expand = c(0,0)) +
+  guides(color = guide_legend(override.aes = list(size = 2))) +
+  geom_hline(yintercept=95, linetype="longdash", color = "red", size=0.5) +
+  geom_text(aes(pos_x[3],95,label ="Max license", vjust=1.5), color="red", size=4) +
+  theme_gdocs() +
+  theme(axis.line.x = element_line(size = 0.1),
+        axis.line.y = element_line(size = 0.1),
+        panel.grid.minor.x = element_line(size=0.05),
+        panel.grid.major.x = element_line(size=0.2),
+        axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)
+        )
+
+W4 <- ggplot(data_n_w4) +
+  geom_line(aes(x=interval, y=n_paid, color="Paid"),size=0.2) +
+  geom_line(aes(x=interval, y=n_exp, color="Express"),size=0.2) +
+  geom_line(aes(x=interval, y=n_auth, color="Authorized"), size=0.2) +
+  geom_line(aes(x=interval, y=n_lim, color="Limited"),size=0.2) +
+  labs(title = "Week 4", x="Time", y="Number of Sessions", color="User Type") +
+  scale_color_manual(breaks=c("Authorized","Limited","Express","Paid"), values=my_colors_4) +
+  scale_x_datetime(breaks="1 day", date_labels = "%m/%d", expand = c(0,0)) +
+  scale_y_continuous(limits=c(0,100), breaks=sort(c(seq(0,100,10),95)), expand = c(0,0)) +
+  guides(color = guide_legend(override.aes = list(size = 2))) +
+  geom_hline(yintercept=95, linetype="longdash", color = "red", size=0.5) +
+  geom_text(aes(pos_x[4],95,label ="Max license", vjust=1.5), color="red", size=4) +
+  theme_gdocs() +
+  theme(axis.line.x = element_line(size = 0.1),
+        axis.line.y = element_line(size = 0.1),
+        panel.grid.minor.x = element_line(size=0.05),
+        panel.grid.major.x = element_line(size=0.2),
+        axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10)
+        )
+
+W1
+W2
+W3
+W4
+```
+<br>
+
+> *To show a general trend of usage over time, I have created a smoother time series plot using moving averages.*
+
+```{r moving_average}
+data_total <- data.frame(interval, n_tot)
+total_smooth <- data_total %>% mutate(n_roll = rollapply(n_tot, width=120, FUN=mean, align = "center", fill=NA))
+
+ggplot(total_smooth) +
+  geom_line(aes(x=interval, y=n_roll), color="black", size=0.3) +
+  labs(title = "Total Maximo Usage in March", x="Date", y="Number of Sessions") +
+  scale_x_datetime(breaks=date_major, date_minor_breaks="1 day", date_labels = "%m/%d", expand = c(0,0)) +
+  scale_y_continuous(limits=c(0,100), breaks=sort(c(seq(0,100,10),95)), expand = c(0,0)) +
+  geom_hline(yintercept=95, linetype="longdash", color = "red", size=0.5) +
+  geom_text(aes(pos_x[5],95,label ="Max license", vjust=1.5), color="red", size=4) +
+  theme_gdocs() +
+  theme(axis.line.x = element_line(size = 0.1),
+        axis.line.y = element_line(size = 0.1),
+        panel.grid.minor.x = element_line(size=0.05),
+        panel.grid.major.x = element_line(size=0.5),
+        axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        legend.position = "none",
+        plot.margin=unit(c(0.5,1,0.5,0.5),"cm")
+        )
+
+```
+<br>
+<br>
+
+### Part 3
+
+This project required you to think critically about the request(s) you were given, clarify information from the customer, and work together as a team. In the section below, please write a short paragraph that answers the following questions: 
+1. Did the Gantt chart request make sense? What was your process in determining how to show the data?<br>
+2. What sort of cleaning did you have to do to the data? What data points did you remove and why?<br>
+3. Did you find it difficult to ask the customer (me) clarifying questions?<br>
+4. Did you take advantage of the student worksessions? How did those help you?<br>
+5. How have you grown as a practitioner through the course of this project?<br>
+
+```
+1. As described above, plotting Gantt chart was not an effective way to show the data because there were too many users to represent in one plot. Also the length of sessions were often too short to be visible in a month-long timeline. A Gantt chart might be useful if we were interested in a select few users' Maximo usage history, as seen by my Gantt chart of 50 users's one week data.. However, the main objective of this data is to see whether or not the client's company exceeding the license threshold of 95. No matter how formatted, gantt charts would not be able to tell me exactly how many of the 763 users are online at the same time. Therefore I found it necessary to create a frequency graph showing how many total sessions of each type and the sum of sessions from Authorized and Limited license types. To analyze the general trend of usage, I created a smoothed time series data from all user types.
+
+2. After loading the csv file, First I converted each column to its correct data type for analysis. Then I filtered out any logs that did not have a valid maxsessionuid(either NA or 0) because they were not true sessions. I also removed any potential duplicate logs. Subsequently, it was necessary to define the beginning and end of a session beause sometimes there were multiple "attemptresults" for each session. I decided that for each session, the start time is determined by "LOGIN" log and that the end of a session is assigned by any one of the same maxsessionuid's "LOGOUT", "TIMEOUT", "SYSLOGOUT", or "RESTART" log, whichever that happened easliest but after the start time. Finally I combined the start and end data into one row so that each row describes one unique session.
+
+3. It was not difficult to ask because I expect the client is looking for a high quality product that meets their needs. However I did sometimes worry that I ask too many questions. Nonetheless, it was imperative to ask the clarifying questions to understand exactly what they're looking for, and to decide which observations to disregard or keep. Moreover, not asking the questions would have resulted in a report that is inaccurate. For example, I had initially deemed all sessions with 0 second duaration as invalid sessions. However I discovered the client wanted to include them in the analysis. This made a difference in calculated average session durations and counts of concurrent sessions. Another necessary clarification was regarding whether to count concurrent sessions by the same user as separate license access. Considering there are 337 users who at some point had multiple sessions ongoing, this made a big difference in counting total concurent sessions. I think asking the questions helped all parties involved to not only understand the data better, but also build a stronger rapport with each other.
+
+4. I attended every student session. Working with the other classmates as a team was one of the most rewarding experiences of this project. It was interesting to see how different people interpreted the project and approached the questions at hand. I adopted several ideas that others brought to the table, and I enjoyed to sharing mine as well. Henry and Freddy brought much needed insight regarding the dataset while Anton's experience with other languages helped me see different ways to acheive the same goals. Saibal's meticulous examination of the data encouraged me to dig in deeper. Also, Sonali has been continously sharing resources and helping me stay on track with the course. In addition to the group sessions, I also had meetings with Sonali, Thu, Robert, Michael, Lanisha, and Namitha individually to help debug their codes. This process helped me become much more confident with R than if I were to work only with my own code. Now I think I can see an error and recoganize how to troubleshoot. All in all, it made me even more excited about becoming a data scientist and working in a team.
+
+5. Considering how I was barely able to subset data and plot simple graphs at the beginning of this project, I believe I have grown immensely. I think my progress is most obvious to me when I read the questions and answers on Stackoverflow. I can  more readily understand the codes that are posted, and then modify them to meet my needs. I have also learned how to ask better questions, both in person and on programming forums. Furthermore, I feel much more comfortable about experimenting with R. For example, even though I relied heavily on dplyr for my aggregate functions, I can also acheive the same results using base-r and data.table packages. Also, reading the documentaions of packages and helped me better grasp the capacity of R. The biggest challenge for me was knowing how to break down a question into smaller steps, and this is something I probably need to work on for a long time. I am nowhere near proficient in R yet, but I believe I can get there. One last lesson I learned from this project was how wonderful the programming community is. I cannot be thankful enough for the generosity of strangers have shown by helping each other learn and sharing packages and other resources for free. It makes me also want to return the favor. I am also grateful for the openhanded guidance and mentorship from our instructor Jonathan. He has truly made this program worthwhile. 
+```
+
+### Submissions
+
+Because we all will be working with the same data, you will only need to send me an updated version of this Markdown file. Please save it as *lastname_firstinitial_Project2.Rmd* and email to me directly at [jon@fowlercs.com](mailto:jon@fowlercs.com). Submissions must be made by **May 19 2020 11:59PM ET**. 
+
+### Resources 
+
+#### Gantt charts
+
+[https://www.statology.org/gantt-chart-r-ggplot2/](https://www.statology.org/gantt-chart-r-ggplot2/) <br>
+[https://stats.andrewheiss.com/misc/gantt.html](https://stats.andrewheiss.com/misc/gantt.html) <br> 
+[https://davetang.org/muse/2017/02/03/gantt-chart-using-r/](https://davetang.org/muse/2017/02/03/gantt-chart-using-r/) <br>
+[https://datascienceplus.com/visualize-your-cvs-timeline-with-r-gantt-style/](https://datascienceplus.com/visualize-your-cvs-timeline-with-r-gantt-style/) <br>
+[https://edwinth.github.io/blog/paletti/](https://edwinth.github.io/blog/paletti/)
+[https://drsimonj.svbtle.com/creating-corporate-colour-palettes-for-ggplot2](https://drsimonj.svbtle.com/creating-corporate-colour-palettes-for-ggplot2)
+[http://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually](http://www.sthda.com/english/wiki/ggplot2-colors-how-to-change-colors-automatically-and-manually)
+
+
+#### R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
